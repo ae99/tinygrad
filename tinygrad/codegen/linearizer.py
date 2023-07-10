@@ -160,10 +160,12 @@ class Linearizer:
     # make the output buffer shape correct in here
     self.sts[0].reshape(self.info.shape)
     self.full_buf_index: int = self.bufs.index(self.earlybufs[0]) if len(self.earlybufs) > 0 else 0
-
+  
     # move all reduce axes to the end
     reduce = list(enumerate(zip(self.full_shape, self.sts[0].shape)))
+    print(reduce)
     permute = tuple([i for i,(s,n) in reduce if s == n] + [i for i,(s,n) in reduce if s != n])
+    print(permute)
     self.reshape_and_permute(None, permute)
 
     # parameters
@@ -386,6 +388,7 @@ class Linearizer:
 
         # if any group_for_reduce items aren't reduces, upcast them here
         for j in self.upcast_in_mid_reduce_axes:
+          print("upcasting", j)
           self.reshape_and_permute(None, [i for i in range(self.shape_len) if i != j] + [j])
           self.upcast()
           self.group_for_reduce.pop()
@@ -563,7 +566,6 @@ class Linearizer:
       for j in range(len(shapes)):
         if mergeable: rets[j][-1] = (rets[j][-1][0] * shapes[j][i], strides[j][i])
         else: rets[j].append((shapes[j][i], strides[j][i]))
-
     # do the reshapes
     for i,x in enumerate(rets): self.sts[i].reshape(tuple([y[0] for y in x]))
 
@@ -716,10 +718,12 @@ class Linearizer:
           xb_choices.append((sum(st.views[-1].strides[axis]>0 for st in self.sts), sum(st.views[-1].strides[axis] for st in self.sts), axis, upcast_amount))
       if len(xb_choices):
         xb_choices = sorted(xb_choices)
-        if DEBUG >= 4: print(f"float4 merging axis : {xb_choices}")
+        print(f"float4 merging axis : {xb_choices}")
+        print("before", self.colored_shape())
         self.shift_to(xb_choices[0][2], amount=xb_choices[0][3])
         self.upcast()
         self.simplify_ones()
+        print("after ", self.colored_shape())
         upcasted_axis.add(xb_choices[0][2])
       else:
         break
@@ -743,6 +747,7 @@ class Linearizer:
       if self.upcasted == 0 and len(self.full_unupcasted_shape) > 0 and self.full_unupcasted_shape[-1] % splits == 0:
         self.shift_to(len(self.full_unupcasted_shape)-1, splits, insert_before=len(self.full_unupcasted_shape))
         self.upcast()
+        print("upcasted at end", self.colored_shape())
 
     # **** local groups ****
 
@@ -752,7 +757,10 @@ class Linearizer:
       last_try = self.local_dims == 0 and axis == 0
       if any(self.sts[buf_index].views[-1].strides[axis] == 0 for buf_index in range(len(self.sts))) or last_try:
         for sz in [x for x in (([32] if last_try else []) + [16,8,4,3]) if self.full_shape[axis] % x == 0 and local_size*x <= 128]:
+          print("local group", axis, sz, self.full_shape[axis], local_size)
+          print("before", self.colored_shape())
           self.shift_to(axis, sz, insert_before=self.first_reduce-self.local_dims)
+          print("after ", self.colored_shape())
           self.local_dims += 1
           break
       if self.local_dims >= 3: break

@@ -106,6 +106,124 @@ Main output of the linearizer is a list of UOps, which is basically the 'lines o
 - creates a store mem op sort of deal?
 
 `LINEARIZE()`:
+- main function that does the linearization
+- 1. add local buffer for multistage reduce
+    - adds the 'temp' Local buffer
+    - only if 'len(self.group_for_reduce)' >= 1
+  
+- 2. defines local buffers for all 'local_alias' buffers
+
+- 3. adds a global loop 'for i in range(0, self.first_reduce-self.local_dims)
+     ? What are `self.first_reduce and self.local_dims`?
+      - first reduce is property:
+         -> first axis where a reduction will occur
+      - local_dims is prop that is 
+           self.first_reduce - global_count ??
+
+- 4. adds a local loop
+                   for i in range(self.first_reduce-self.local_dims, self.first_reduce+len(self.group_for_reduce)) -> so continues from above
+- 5. upcast indexes
+       - gets everything after self.upcasted for both `self.full_shape` and `self.output_shape`
+        - ??? What are self.full_shape and self.output_shape really???
+         - self.full_shape = self.sts[self.full_buf_index].shape
+         - self.output_shape = self.sts[0].shape
+         
+         - self.shape_len = len(self.sts[0].shape) -> in theory all shapes are equal length then?
+         - self.upcasted 
+              -> we add one to it when we call .upcast
+              -> seems to 'drop the last axis/dimension'?
+
+-  6. make the reduce op
+     1. define an accumulator
+     2. define loop
+     3. compute local aliases -> something to do with tensor cores
+     4. load earlybufs
+     5. run ast_parse
+        -> takes a chunk of the ast and turns it into a list of tokens
+     6. ends reduce loop
+   
+    7. if group_for_reduce -> doing local reduce
+     - store in buffer
+     - add a barrier
+     - end loop
+
+    8. 
+
+`shift_to()`:
+ - seems to be basically the same as what I was trying to do...
+   moves a bunch of an axis to be somewhere elese 
+
+
+`simplify_ones()`:
+ - basically just removes axis where the size is 1 for all shapes being tracked
+ - e.g. [1, 2, 3, 1, 1] -> [2, 3]
+
+ `simplify_merge_adjacent()`:
+ - not quite sure, something fancy to my knowledge
+
+
+`required_optimizations()`:
+- iterates through all buffers
+  - lists all the axis with stride=1 and axis size divisible by 4
+  - if we're an image or something?
+     - basically attemtps to group axis together as 4 if it can?
+
+`limit_global_dims`:
+- attempts to merge dimensions togther if too many overall
+
+
+`alias_buffer`
+-> some fancy thing???
+
+
+`hand_coded_optimizations`:
+ - couple random parts to images
+ - check if float4 not in use and first_reduce is early-ish (i.e. not too many other dims) and overall elements in first set of dimensions isn't too small
+    -> does some weird shit where it moves stuff around for 'grouping'???
+  - if not grouping, more optimizations
+    - while elements impacted before first reduce is large
+    -
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-> Upcasting seems to just be operations like converting 4 floats into a float4
+-> Loop unrolling seems to also be an upcast?
+-> 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

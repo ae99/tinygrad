@@ -5,7 +5,7 @@ import sys, importlib, inspect, functools, pathlib
 from weakref import ref
 
 import numpy as np
-from tinygrad.helpers import GRAPH, DEBUG, prod, getenv, DType, dtypes, flatten, ImageDType, LightWeakSet, LightWeakValueDictionary
+from tinygrad.helpers import GRAPH, DEBUG, dedup, prod, getenv, DType, dtypes, flatten, ImageDType, LightWeakSet, LightWeakValueDictionary
 from tinygrad.runtime.ops_cpu import RawNumpyBuffer
 from tinygrad.runtime.ops_disk import RawDiskBuffer
 from tinygrad.shape.shapetracker import MovementOps, ShapeTracker, View, get_contraction
@@ -206,17 +206,58 @@ class LazyBuffer:
       if root.st.contiguous and root != self and prod(ret.st.shape) == prod(root.shape):
         return root.reshape(ret.st.shape)
     return ret
+  
 
   def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
     if self.shape == tuple(new_shape): return self
     srcs = _push_movement_ops((self,)) if SHUFFLE_MOVEMENT_OPS else (self,)
 
-    # Split multi-axis reduction into two kernels on Metal for perf
-    if sum(shape_differences := [new != old for new, old in zip(new_shape, self.shape)]) > 1 and self.device == "METAL":
-      intermediate_shape = tuple(old if i == shape_differences.index(True) else new for i, (new, old) in enumerate(zip(new_shape, self.shape)))
-      return create_lazybuffer(self.device, ShapeTracker(intermediate_shape), ReduceOps, LazyOp(op, srcs, intermediate_shape), self.dtype).reduce_op(op, new_shape)
+    op = LazyOp(op, srcs, new_shape)
+    return_value = create_lazybuffer(
+      device=self.device,
+      st=ShapeTracker(new_shape),
+      optype=ReduceOps,
+      op=op, # e.g. LazyOp(ReduceOps.SUM, (input_lazy_buffer->self,), reduced_shape)
+      dtype=self.dtype,
+    )
+    
+    buffers = [return_value] + dedup(op.buffers)
+    print(buffers)
+    sts: List[ShapeTracker] = [x.st.copy() for x in buffers]
+    
+    reduce = list(enumerate(zip(self.shape, sts[0].shape)))
+    permute = tuple([i for i,(s,n) in reduce if s == n] + [i for i,(s,n) in reduce if s != n])
+    
+    def reshape_and_permute(sts, new_shape_fxn, axis):
+      for st in sts:
+        if new_shape_fxn is not None: st.reshape(tuple(new_shape_fxn(st.shape)))
+        if axis is not None: st.permute(tuple(axis))
 
-    return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype)
+    def shift_to(sts, axis, amount, top=False, insert_before=None):
+      if insert_before is None: insert_before = len(sts[0].shape)
+      move_axis = axis if top else axis+1
+      if move_axis < insert_before: insert_before += 1
+      reshape_and_permute(
+        sts,
+        lambda x: list(x[0:axis]) + (([amount, x[axis]//amount] if top else [x[axis]//amount, amount]) if x[axis] > 1 else [1,1]) + list(x[axis+1:]),
+        [i for i in range(insert_before) if i != move_axis] + [move_axis] + [i for i in range(insert_before, len(sts[0].shape)+1) if i != move_axis])
+
+    print('before', sts)    
+    reshape_and_permute(sts, None, permute)
+    print('after', sts)
+    
+    last_axis =  len(sts[0].shape)-1 
+    shift_to(sts, last_axis, 128, True)
+    
+    print('after2', sts)
+
+    
+    # Split multi-axis reduction into two kernels on Metal for perf
+    # if sum(shape_differences := [new != old for new, old in zip(new_shape, self.shape)]) > 1 and self.device == "METAL":
+    #   intermediate_shape = tuple(old if i == shape_differences.index(True) else new for i, (new, old) in enumerate(zip(new_shape, self.shape)))
+    #   return create_lazybuffer(self.device, ShapeTracker(intermediate_shape), ReduceOps, LazyOp(op, srcs, intermediate_shape), self.dtype).reduce_op(op, new_shape)
+    return return_value
+    # return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype)
 
   def reshape(self:LazyBuffer, arg:Tuple[int, ...]) -> LazyBuffer:
     if self.shape == arg: return self
