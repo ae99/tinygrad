@@ -207,16 +207,60 @@ class LazyBuffer:
         return root.reshape(ret.st.shape)
     return ret
 
-  def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
+  def _reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
+    print(f"REDUCE: {self.shape} -> {new_shape}")
     if self.shape == tuple(new_shape): return self
     srcs = _push_movement_ops((self,)) if SHUFFLE_MOVEMENT_OPS else (self,)
-
-    # Split multi-axis reduction into two kernels on Metal for perf
-    if sum(shape_differences := [new != old for new, old in zip(new_shape, self.shape)]) > 1 and self.device == "METAL":
-      intermediate_shape = tuple(old if i == shape_differences.index(True) else new for i, (new, old) in enumerate(zip(new_shape, self.shape)))
-      return create_lazybuffer(self.device, ShapeTracker(intermediate_shape), ReduceOps, LazyOp(op, srcs, intermediate_shape), self.dtype).reduce_op(op, new_shape)
-
     return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype)
+
+  def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
+    if prod(self.shape) // prod(new_shape) > 1:
+      print(f"LARGE REDUCE: {self.shape} -> {new_shape}")
+      # possible reductions
+      # (4096, 4096) => (4096, 1)
+      # (4096, 4096) => (1, 4096)
+      # (4096, 4096) => (1,1)
+      # (4096,) => (1,)
+      
+      # ideas:
+      # (4096,) => (1,):
+      # (4096,) => r(16, 256) => (16, 1) => (1,1) => (1,)
+      
+      # (4096, 4096) => (1,1):
+      # (4096, 4096) => rs(4096, 16, 256) => rd(4096, 16, 1) => rd(1, 1, 1) => (1,1,)
+      
+      # (512, 512, 512) => (512, 1, 512):
+      # (512, 512, 512) => rs(512, 2, 256, 512) => rd(512, 2, 1, 512) => (512, 1, 1, 512)
+      # reshape last reduction dimension by dividing by 256
+      # reduce on our added axis down to 1
+      reduced_dimensions = [i for i, (a, b) in enumerate(zip(self.shape, new_shape)) if a != b]
+      final_reduction_index = reduced_dimensions[-1]
+      reduction_size = min(256, self.shape[final_reduction_index])
+      
+      intermediate_size = list(self.shape)
+      intermediate_size[final_reduction_index] //= reduction_size
+      intermediate_size.insert(final_reduction_index + 1, reduction_size)
+      
+      reshaped = self.reshape(tuple(intermediate_size))
+      
+      intermediate_size[final_reduction_index + 1] = 1 
+      
+      reduced = reshaped._reduce_op(op, tuple(intermediate_size))
+      
+      if tuple(intermediate_size) != new_shape:
+        new_shape_intermediate = list(new_shape)
+        new_shape_intermediate.insert(final_reduction_index + 1, 1)
+        reduced = reduced._reduce_op(op, tuple(new_shape_intermediate))
+      
+      return reduced.reshape(new_shape)
+              
+    # Split multi-axis reduction into two kernels on Metal for perf
+    # if sum(shape_differences := [new != old for new, old in zip(new_shape, self.shape)]) > 1:# and self.device == "METAL":
+    #   intermediate_shape = tuple(old if i == shape_differences.index(True) else new for i, (new, old) in enumerate(zip(new_shape, self.shape)))
+    #   print(f"splitting multi-axis reduction into two kernels on Metal for perf: {self.shape} -> {new_shape}, intermediate_shape={intermediate_shape}")
+    #   return create_lazybuffer(self.device, ShapeTracker(intermediate_shape), ReduceOps, LazyOp(op, srcs, intermediate_shape), self.dtype).reduce_op(op, new_shape)
+
+    return self._reduce_op(op, new_shape)
 
   def reshape(self:LazyBuffer, arg:Tuple[int, ...]) -> LazyBuffer:
     if self.shape == arg: return self

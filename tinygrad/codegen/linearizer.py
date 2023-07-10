@@ -483,6 +483,7 @@ class Linearizer:
     # compact all the dimensions into the first
     # NOTE: this might make multiview shapetrackers
     if limit and (self.first_reduce-self.local_dims) > limit:
+      print("WARNING: too many global dimensions, compacting")
       num_to_merge = ((self.first_reduce-self.local_dims) - limit)+1
       self.reshape_and_permute(lambda x: (prod(x[0:num_to_merge]),)+x[num_to_merge:], None)
       if DEBUG >= 3: print("reshaped to", self.full_shape, "due to too many global dimensions")
