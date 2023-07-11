@@ -196,7 +196,7 @@ class LazyBuffer:
     if not self.realized and self.op.op == LoadOps.CONTIGUOUS: return self  # two CONTIGUOUS in a row is one
     return create_lazybuffer(self.device, ShapeTracker(self.shape), LoadOps, LazyOp(LoadOps.CONTIGUOUS, (self,), None), self.dtype)
 
-  def shuffle_and_prune_movement_ops(self, st: ShapeTracker, op: MovementOps, arg: Union[Tuple[int, ...], Tuple[Tuple[int, int], ...]]) -> LazyBuffer:
+  def cshuffle_and_prune_movement_ops(self, st: ShapeTracker, op: MovementOps, arg: Union[Tuple[int, ...], Tuple[Tuple[int, int], ...]]) -> LazyBuffer:
     if SHUFFLE_MOVEMENT_OPS and self.optype == BinaryOps and not self.realized and (op in {MovementOps.SHRINK, MovementOps.STRIDE, MovementOps.PERMUTE} or (op == MovementOps.RESHAPE and self.op.op in UnaryOps)) and len(self.children) == 0:
       return self.op.replace_with_movement_ops([(op, arg)])
     ret = create_lazybuffer(self.device, st, MovementOps, LazyOp(op, (self,), arg), self.dtype)
@@ -207,26 +207,8 @@ class LazyBuffer:
         return root.reshape(ret.st.shape)
     return ret
   
-
+  
   def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
-    if self.shape == tuple(new_shape): return self
-    srcs = _push_movement_ops((self,)) if SHUFFLE_MOVEMENT_OPS else (self,)
-
-    op = LazyOp(op, srcs, new_shape)
-    return_value = create_lazybuffer(
-      device=self.device,
-      st=ShapeTracker(new_shape),
-      optype=ReduceOps,
-      op=op, # e.g. LazyOp(ReduceOps.SUM, (input_lazy_buffer->self,), reduced_shape)
-      dtype=self.dtype,
-    )
-    
-    buffers = [return_value] + dedup(op.buffers)
-    print(buffers)
-    sts: List[ShapeTracker] = [x.st.copy() for x in buffers]
-    
-    reduce = list(enumerate(zip(self.shape, sts[0].shape)))
-    permute = tuple([i for i,(s,n) in reduce if s == n] + [i for i,(s,n) in reduce if s != n])
     
     def reshape_and_permute(sts, new_shape_fxn, axis):
       for st in sts:
@@ -241,23 +223,92 @@ class LazyBuffer:
         sts,
         lambda x: list(x[0:axis]) + (([amount, x[axis]//amount] if top else [x[axis]//amount, amount]) if x[axis] > 1 else [1,1]) + list(x[axis+1:]),
         [i for i in range(insert_before) if i != move_axis] + [move_axis] + [i for i in range(insert_before, len(sts[0].shape)+1) if i != move_axis])
-
-    print('before', sts)    
-    reshape_and_permute(sts, None, permute)
-    print('after', sts)
+      
     
+    if self.shape == tuple(new_shape): return self
+    srcs = _push_movement_ops((self,)) if SHUFFLE_MOVEMENT_OPS else (self,)
+
+    reduce = list(enumerate(zip(self.shape, new_shape)))
+    permute = tuple([i for i,(s,n) in reduce if s == n] + [i for i,(s,n) in reduce if s != n])
+    
+    
+    og_st = self.st.copy()
+    new_st = ShapeTracker(tuple(new_shape))
+    sts: List[ShapeTracker] = dedup([og_st] + [x.st.copy() for x in self.buffers] + [new_st])
+    reshape_and_permute(sts, None, permute)
+
+    ## <V1>
+    # # Now we have all reductions at the end.
+    # # Let's create the intermediate shape
+    # intermediate = list(sts[0].shape)
+    # intermediate[-1] = 128
+    # print('intermediate', intermediate)
+    # intermediate_st = ShapeTracker(tuple(intermediate))
+    # sts.append(intermediate_st)
+      
+    # # Now we perform the shift.
+    # last_axis =  len(sts[0].shape)-1 
+    # shift_to(sts, last_axis, 128, True)
+    # <V1/>
+    ## <V2>
+    # Now we have all reductions at the end.
+    # Now we perform the shift.
     last_axis =  len(sts[0].shape)-1 
     shift_to(sts, last_axis, 128, True)
+    # Let's create the intermediate shape
+    intermediate = list(sts[0].shape)
+    intermediate[-1] = 1
+    print('intermediate', intermediate)
+    intermediate_st = ShapeTracker(tuple(intermediate))
+    sts.append(intermediate_st)
+    # <V2/>
     
-    print('after2', sts)
+    
+    print('og', og_st.shape, 'intermediate_st', intermediate_st.shape)
+
+    op1 = LazyOp(op, srcs, tuple(intermediate_st.shape))
+    buffer1 = create_lazybuffer(
+      self.device,
+      intermediate_st,
+      ReduceOps,
+      op1,
+      self.dtype,
+    )
+    
+    print('buffer1', buffer1.shape, 'new_st', new_st.shape)
+    
+    op2 = LazyOp(op, (buffer1,), tuple(new_st.shape))
+    buffer2 = create_lazybuffer(
+      self.device,
+      new_st,
+      ReduceOps,
+      op2,
+      self.dtype,
+    )
+    
+    return buffer2
+    
+    # buffers = [return_value] + dedup(op.buffers)
+    # print(buffers)
+    # sts: List[ShapeTracker] = [x.st.copy() for x in buffers]
+    
+    
+    # print('before', sts)    
+    # reshape_and_permute(sts, None, permute)
+    # print('after', sts)
+    
+    # last_axis =  len(sts[0].shape)-1 
+    # shift_to(sts, last_axis, 128, True)
+    
+    # print('after2', sts)
 
     
     # Split multi-axis reduction into two kernels on Metal for perf
     # if sum(shape_differences := [new != old for new, old in zip(new_shape, self.shape)]) > 1 and self.device == "METAL":
     #   intermediate_shape = tuple(old if i == shape_differences.index(True) else new for i, (new, old) in enumerate(zip(new_shape, self.shape)))
     #   return create_lazybuffer(self.device, ShapeTracker(intermediate_shape), ReduceOps, LazyOp(op, srcs, intermediate_shape), self.dtype).reduce_op(op, new_shape)
-    return return_value
-    # return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype)
+    # return return_value
+    return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype)
 
   def reshape(self:LazyBuffer, arg:Tuple[int, ...]) -> LazyBuffer:
     if self.shape == arg: return self

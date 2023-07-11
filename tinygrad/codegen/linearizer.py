@@ -163,9 +163,9 @@ class Linearizer:
   
     # move all reduce axes to the end
     reduce = list(enumerate(zip(self.full_shape, self.sts[0].shape)))
-    print(reduce)
+    print('reduce', reduce)
     permute = tuple([i for i,(s,n) in reduce if s == n] + [i for i,(s,n) in reduce if s != n])
-    print(permute)
+    print('permute', permute)
     self.reshape_and_permute(None, permute)
 
     # parameters
