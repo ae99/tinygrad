@@ -172,9 +172,11 @@ class TestSpeed(unittest.TestCase):
     # def f(a, b): return a.sum(axis=0)
     helper_test_generic_square('sum', 1024, f, f, onearg=True)
     helper_test_generic_square('sum', 2048, f, f, onearg=True)
-    helper_test_generic_square('sum', 8192, f, f, onearg=True)
-    helper_test_generic_cube('cube_sum', 256, f, f, onearg=True)
     helper_test_generic_square('sum', 4096, f, f, onearg=True)
+    helper_test_generic_square('sum', 8192, f, f, onearg=True)
+    helper_test_generic_square('sum', 8192*2, f, f, onearg=True)
+    helper_test_generic_cube('cube_sum', 256, f, f, onearg=True)
+    helper_test_generic_line('line_sum', 2048, f, f, onearg=True)
     helper_test_generic_line('line_sum', 4096, f, f, onearg=True)
     
     
