@@ -196,7 +196,7 @@ class LazyBuffer:
     if not self.realized and self.op.op == LoadOps.CONTIGUOUS: return self  # two CONTIGUOUS in a row is one
     return create_lazybuffer(self.device, ShapeTracker(self.shape), LoadOps, LazyOp(LoadOps.CONTIGUOUS, (self,), None), self.dtype)
 
-  def cshuffle_and_prune_movement_ops(self, st: ShapeTracker, op: MovementOps, arg: Union[Tuple[int, ...], Tuple[Tuple[int, int], ...]]) -> LazyBuffer:
+  def shuffle_and_prune_movement_ops(self, st: ShapeTracker, op: MovementOps, arg: Union[Tuple[int, ...], Tuple[Tuple[int, int], ...]]) -> LazyBuffer:
     if SHUFFLE_MOVEMENT_OPS and self.optype == BinaryOps and not self.realized and (op in {MovementOps.SHRINK, MovementOps.STRIDE, MovementOps.PERMUTE} or (op == MovementOps.RESHAPE and self.op.op in UnaryOps)) and len(self.children) == 0:
       return self.op.replace_with_movement_ops([(op, arg)])
     ret = create_lazybuffer(self.device, st, MovementOps, LazyOp(op, (self,), arg), self.dtype)
@@ -237,36 +237,25 @@ class LazyBuffer:
     sts: List[ShapeTracker] = dedup([og_st] + [x.st.copy() for x in self.buffers] + [new_st])
     reshape_and_permute(sts, None, permute)
 
-    ## <V1>
-    # # Now we have all reductions at the end.
-    # # Let's create the intermediate shape
-    # intermediate = list(sts[0].shape)
-    # intermediate[-1] = 128
-    # print('intermediate', intermediate)
-    # intermediate_st = ShapeTracker(tuple(intermediate))
-    # sts.append(intermediate_st)
-      
-    # # Now we perform the shift.
-    # last_axis =  len(sts[0].shape)-1 
-    # shift_to(sts, last_axis, 128, True)
-    # <V1/>
-    ## <V2>
+    input_permuted = srcs[0].permute(permute)
+
     # Now we have all reductions at the end.
     # Now we perform the shift.
     last_axis =  len(sts[0].shape)-1 
-    shift_to(sts, last_axis, 128, True)
+    amount_to_shift = min(128, sts[0].shape[last_axis])
+    
+    shift_to(sts, last_axis, amount_to_shift, True)
     # Let's create the intermediate shape
     intermediate = list(sts[0].shape)
     intermediate[-1] = 1
     print('intermediate', intermediate)
     intermediate_st = ShapeTracker(tuple(intermediate))
-    sts.append(intermediate_st)
-    # <V2/>
-    
     
     print('og', og_st.shape, 'intermediate_st', intermediate_st.shape)
 
-    op1 = LazyOp(op, srcs, tuple(intermediate_st.shape))
+    input_reshaped = input_permuted.reshape(og_st.shape)
+
+    op1 = LazyOp(op, (input_reshaped,), tuple(intermediate_st.shape))
     buffer1 = create_lazybuffer(
       self.device,
       intermediate_st,
@@ -285,6 +274,9 @@ class LazyBuffer:
       op2,
       self.dtype,
     )
+    
+    buffer2 = buffer2.reshape(tuple(new_shape))
+    buffer2 = buffer2.permute(tuple([i for i in range(len(new_shape))]))
     
     return buffer2
     
