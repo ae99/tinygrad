@@ -243,16 +243,16 @@ class LazyBuffer:
     # Now we have all reductions at the end.
     # Now we perform the shift.
     last_axis =  len(sts[0].shape)-1 
-    amount_to_shift = math.gcd(128, sts[0].shape[last_axis])
+    amount_to_shift = math.gcd(256, sts[0].shape[last_axis])
     
     shift_to(sts, last_axis, amount_to_shift, True)
     # Let's create the intermediate shape
     intermediate = list(sts[0].shape)
     intermediate[-1] = 1
-    print('intermediate', intermediate)
+    # print('intermediate', intermediate)
     intermediate_st = ShapeTracker(tuple(intermediate))
     
-    print('og', og_st.shape, 'intermediate_st', intermediate_st.shape)
+    # print('og', og_st.shape, 'intermediate_st', intermediate_st.shape)
 
     input_reshaped = input_permuted.reshape(og_st.shape)
 
@@ -265,7 +265,7 @@ class LazyBuffer:
       self.dtype,
     )
     
-    print('buffer1', buffer1.shape, 'new_st', new_st.shape)
+    # print('buffer1', buffer1.shape, 'new_st', new_st.shape)
     
     op2 = LazyOp(op, (buffer1,), tuple(new_st.shape))
     buffer2 = create_lazybuffer(
