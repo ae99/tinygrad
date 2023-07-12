@@ -208,100 +208,22 @@ class LazyBuffer:
         return root.reshape(ret.st.shape)
     return ret
   
-  
-  def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
-    
-    def reshape_and_permute(sts, new_shape_fxn, axis):
-      for st in sts:
-        if new_shape_fxn is not None: st.reshape(tuple(new_shape_fxn(st.shape)))
-        if axis is not None: st.permute(tuple(axis))
-
-    def shift_to(sts, axis, amount, top=False, insert_before=None):
-      if insert_before is None: insert_before = len(sts[0].shape)
-      move_axis = axis if top else axis+1
-      if move_axis < insert_before: insert_before += 1
-      reshape_and_permute(
-        sts,
-        lambda x: list(x[0:axis]) + (([amount, x[axis]//amount] if top else [x[axis]//amount, amount]) if x[axis] > 1 else [1,1]) + list(x[axis+1:]),
-        [i for i in range(insert_before) if i != move_axis] + [move_axis] + [i for i in range(insert_before, len(sts[0].shape)+1) if i != move_axis])
-      
-    
+  def _reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
     if self.shape == tuple(new_shape): return self
     srcs = _push_movement_ops((self,)) if SHUFFLE_MOVEMENT_OPS else (self,)
-
-    reduce = list(enumerate(zip(self.shape, new_shape)))
-    permute = tuple([i for i,(s,n) in reduce if s == n] + [i for i,(s,n) in reduce if s != n])
-    
-    
-    og_st = self.st.copy()
-    new_st = ShapeTracker(tuple(new_shape))
-    sts: List[ShapeTracker] = dedup([og_st] + [x.st.copy() for x in self.buffers] + [new_st])
-    reshape_and_permute(sts, None, permute)
-
-    input_permuted = srcs[0].permute(permute)
-
-    # Now we have all reductions at the end.
-    # Now we perform the shift.
-    last_axis =  len(sts[0].shape)-1 
-    amount_to_shift = math.gcd(256, sts[0].shape[last_axis])
-    
-    shift_to(sts, last_axis, amount_to_shift, True)
-    # Let's create the intermediate shape
-    intermediate = list(sts[0].shape)
-    intermediate[-1] = 1
-    # print('intermediate', intermediate)
-    intermediate_st = ShapeTracker(tuple(intermediate))
-    
-    # print('og', og_st.shape, 'intermediate_st', intermediate_st.shape)
-
-    input_reshaped = input_permuted.reshape(og_st.shape)
-
-    op1 = LazyOp(op, (input_reshaped,), tuple(intermediate_st.shape))
-    buffer1 = create_lazybuffer(
-      self.device,
-      intermediate_st,
-      ReduceOps,
-      op1,
-      self.dtype,
-    )
-    
-    # print('buffer1', buffer1.shape, 'new_st', new_st.shape)
-    
-    op2 = LazyOp(op, (buffer1,), tuple(new_st.shape))
-    buffer2 = create_lazybuffer(
-      self.device,
-      new_st,
-      ReduceOps,
-      op2,
-      self.dtype,
-    )
-    
-    buffer2 = buffer2.reshape(tuple(new_shape))
-    buffer2 = buffer2.permute(tuple([i for i in range(len(new_shape))]))
-    
-    return buffer2
-    
-    # buffers = [return_value] + dedup(op.buffers)
-    # print(buffers)
-    # sts: List[ShapeTracker] = [x.st.copy() for x in buffers]
-    
-    
-    # print('before', sts)    
-    # reshape_and_permute(sts, None, permute)
-    # print('after', sts)
-    
-    # last_axis =  len(sts[0].shape)-1 
-    # shift_to(sts, last_axis, 128, True)
-    
-    # print('after2', sts)
-
-    
-    # Split multi-axis reduction into two kernels on Metal for perf
-    # if sum(shape_differences := [new != old for new, old in zip(new_shape, self.shape)]) > 1 and self.device == "METAL":
-    #   intermediate_shape = tuple(old if i == shape_differences.index(True) else new for i, (new, old) in enumerate(zip(new_shape, self.shape)))
-    #   return create_lazybuffer(self.device, ShapeTracker(intermediate_shape), ReduceOps, LazyOp(op, srcs, intermediate_shape), self.dtype).reduce_op(op, new_shape)
-    # return return_value
     return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype)
+
+  def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[int, ...]) -> LazyBuffer:
+    if prod(self.shape) // prod(new_shape) > 8192:
+      reduced_dimensions = [(i, math.gcd(256, old), stride) for i, (old, new, stride) in enumerate(zip(self.shape, new_shape, self.st.real_strides())) if old != new]
+      dimension_to_split, divisor, _ = max(reduced_dimensions, key=lambda v: v[1]//(v[2] or math.inf) ) # heuristic -> choose largest divisor, penalize large strides
+
+      intermediate_input_shape = self.shape[:dimension_to_split] + (self.shape[dimension_to_split]//divisor, divisor) + self.shape[dimension_to_split+1:]
+      intermediate_output_shape = self.shape[:dimension_to_split] + (self.shape[dimension_to_split]//divisor, 1) + self.shape[dimension_to_split+1:]
+      final_input_shape = self.shape[:dimension_to_split] + (self.shape[dimension_to_split]//divisor,) + self.shape[dimension_to_split+1:]
+    
+      return self.reshape(intermediate_input_shape)._reduce_op(op, intermediate_output_shape).reshape(final_input_shape)._reduce_op(op, new_shape)
+    return self._reduce_op(op, new_shape)
 
   def reshape(self:LazyBuffer, arg:Tuple[int, ...]) -> LazyBuffer:
     if self.shape == arg: return self
