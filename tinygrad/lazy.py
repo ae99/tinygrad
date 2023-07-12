@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 import operator
 from typing import Callable, Optional, Tuple, Union, List, Dict, Any, cast
 import sys, importlib, inspect, functools, pathlib
@@ -242,7 +243,7 @@ class LazyBuffer:
     # Now we have all reductions at the end.
     # Now we perform the shift.
     last_axis =  len(sts[0].shape)-1 
-    amount_to_shift = min(128, sts[0].shape[last_axis])
+    amount_to_shift = math.gcd(128, sts[0].shape[last_axis])
     
     shift_to(sts, last_axis, amount_to_shift, True)
     # Let's create the intermediate shape
